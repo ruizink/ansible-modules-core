@@ -20,10 +20,10 @@
 try:
     import shade
     from shade import meta
+
     HAS_SHADE = True
 except ImportError:
     HAS_SHADE = False
-
 
 DOCUMENTATION = '''
 ---
@@ -55,8 +55,15 @@ options:
      description:
        - Perform the given action. The lock and unlock actions always return
          changed as the servers API does not provide lock status.
-     choices: [stop, start, pause, unpause, lock, unlock, suspend, resume]
-     default: present
+     choices: [stop, start, pause, unpause, lock, unlock, suspend, resume, set_medatada, delete_metadata]
+     required: true
+   meta:
+     description:
+        - 'A list of key value pairs that should be provided as a metadata to
+          the instance or a string containing a list of key-value pairs.
+          Eg:  meta: "key1=value1,key2=value2"'
+     required: false
+     default: None
 requirements:
     - "python >= 2.6"
     - "shade"
@@ -86,6 +93,11 @@ _action_map = {'stop': 'SHUTOFF',
 
 _admin_actions = ['pause', 'unpause', 'suspend', 'resume', 'lock', 'unlock']
 
+_system_state_actions = ['stop', 'start', 'pause', 'unpause', 'lock', 'unlock', 'suspend', 'resume']
+
+_metadata_actions = ['set_metadata', 'delete_metadata']
+
+
 def _wait(timeout, cloud, server, action):
     """Wait for the server to reach the desired state for the given action."""
 
@@ -103,29 +115,25 @@ def _wait(timeout, cloud, server, action):
         if server.status == 'ERROR':
             module.fail_json(msg="Server reached ERROR state while attempting to %s" % action)
 
+
 def _system_state_change(action, status):
     """Check if system state would change."""
     if status == _action_map[action]:
         return False
     return True
 
-def main():
-    argument_spec = openstack_full_argument_spec(
-        server=dict(required=True),
-        action=dict(required=True, choices=['stop', 'start', 'pause', 'unpause',
-                                            'lock', 'unlock', 'suspend', 'resume']),
-    )
 
-    module_kwargs = openstack_module_kwargs()
-    module = AnsibleModule(argument_spec, supports_check_mode=True, **module_kwargs)
+def _needs_metadata_update(server_metadata={}, metadata={}):
+    return len(set(metadata.items()) - set(server_metadata.items())) != 0
 
-    if not HAS_SHADE:
-        module.fail_json(msg='shade is required for this module')
 
-    action = module.params['action']
+def _get_metadate_keys_to_delete(server_metadata_keys=[], metadata_keys=[]):
+    return set(server_metadata_keys) & set(metadata_keys)
+
+
+def _handle_system_state_action(action, module):
     wait = module.params['wait']
     timeout = module.params['timeout']
-
     try:
         if action in _admin_actions:
             cloud = shade.operator_cloud(**module.params)
@@ -206,8 +214,83 @@ def main():
     except shade.OpenStackCloudException as e:
         module.fail_json(msg=str(e), extra_data=e.extra_data)
 
+
+def _handle_metadata_action(action, module):
+    server_name = module.params['server']
+    metadata = module.params['meta']
+    changed = False
+
+    try:
+        cloud_params = dict(module.params)
+        cloud = shade.openstack_cloud(**cloud_params)
+
+        server = cloud.get_server(server_name)
+        if not server:
+            module.fail_json(
+                msg='Could not find server %s' % server_name)
+
+        # convert the metadata to dict, in case it was provided as CSV
+        if type(metadata) is str:
+            metas = {}
+            for kv_str in metadata.split(","):
+                k, v = kv_str.split("=")
+                metas[k] = v
+            metadata = metas
+
+        if action == 'set_metadata':
+            # check if it needs update
+            if _needs_metadata_update(server_metadata=server.metadata, metadata=metadata):
+                if module.check_mode:
+                    module.exit_json(changed=True)
+                else:
+                    cloud.server_set_metadata(server_name, metadata)
+                    changed = True
+        elif action == 'delete_metadata':
+            # remove from params the keys that do not exist in the server
+            keys_to_delete = _get_metadate_keys_to_delete(server.metadata.keys(), metadata.keys())
+            if len(keys_to_delete) > 0:
+                if module.check_mode:
+                    module.exit_json(changed=True)
+                else:
+                    cloud.server_delete_metadata(server_name, keys_to_delete)
+                    changed = True
+
+        if changed:
+            server = cloud.get_server(server_name)
+
+        module.exit_json(
+            changed=changed, server_id=server.id, metadata=server.metadata)
+
+    except shade.OpenStackCloudException as e:
+        module.fail_json(msg=e.message, extra_data=e.extra_data)
+
+
+def main():
+    argument_spec = openstack_full_argument_spec(
+        server=dict(required=True),
+        action=dict(required=True, choices=['stop', 'start', 'pause', 'unpause', 'lock', 'unlock', 'suspend', 'resume',
+                                            'set_metadata', 'delete_metadata']),
+        meta=dict(required=False, default=None),
+    )
+
+    module_kwargs = openstack_module_kwargs()
+    module = AnsibleModule(argument_spec, supports_check_mode=True, **module_kwargs)
+
+    if not HAS_SHADE:
+        module.fail_json(msg='shade is required for this module')
+
+    action = module.params['action']
+
+    if action in _system_state_actions:
+        _handle_system_state_action(action, module)
+
+    if action in _metadata_actions:
+        _handle_metadata_action(action, module)
+
+
 # this is magic, see lib/ansible/module_common.py
 from ansible.module_utils.basic import *
 from ansible.module_utils.openstack import *
+
 if __name__ == '__main__':
     main()

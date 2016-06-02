@@ -243,7 +243,7 @@ def _handle_metadata_action(action, module):
                 if module.check_mode:
                     module.exit_json(changed=True)
                 else:
-                    cloud.server_set_metadata(server_name, metadata)
+                    cloud.set_metadata_server(server_name, metadata)
                     changed = True
         elif action == 'delete_metadata':
             # remove from params the keys that do not exist in the server
@@ -252,7 +252,7 @@ def _handle_metadata_action(action, module):
                 if module.check_mode:
                     module.exit_json(changed=True)
                 else:
-                    cloud.server_delete_metadata(server_name, keys_to_delete)
+                    cloud.delete_metadata_server(server_name, keys_to_delete)
                     changed = True
 
         if changed:
